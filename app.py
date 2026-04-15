@@ -1,7 +1,6 @@
 import streamlit as st
 from google import genai
 from google.genai import types
-from PIL import Image
 import tempfile
 import os
 import io
@@ -9,32 +8,57 @@ import re
 from docx import Document
 from docx.shared import Pt, RGBColor, Cm
 
-# --- 1. CẤU HÌNH TRANG ---
+# =========================
+# 1. CẤU HÌNH CHUNG
+# =========================
 st.set_page_config(page_title="Trợ lý Giáo án NLS", page_icon="📘", layout="centered")
 
 FILE_KHUNG_NANG_LUC = "khungnanglucso.pdf"
 MODEL_NAME = "gemini-2.5-flash-lite"
 
-# --- 2. HÀM XỬ LÝ WORD ---
-def add_formatted_text(paragraph, text):
-    """Hàm in đậm và ép font Times New Roman"""
-    paragraph.style.font.name = "Times New Roman"
-    paragraph.style.font.size = Pt(14)
+TEN_TAC_GIA = "La Mạnh Hùng"
+TEN_TRUONG = "Trường PTDTBT TH&THCS Nà Khương"
+SO_DIEN_THOAI = "0388 667 404"
+TEN_UNG_DUNG = "📘 TRỢ LÝ SOẠN GIÁO ÁN TỰ ĐỘNG (NLS)"
 
+
+# =========================
+# 2. HÀM TIỆN ÍCH
+# =========================
+def safe_html(text: str) -> str:
+    """Thoát ký tự HTML cơ bản để hiển thị an toàn trong markdown HTML."""
+    if not text:
+        return ""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def add_formatted_text(paragraph, text):
+    """Thêm text có hỗ trợ in đậm bằng cú pháp **text** và ép font Times New Roman."""
     parts = re.split(r"(\*\*.*?\*\*)", text)
     for part in parts:
+        if not part:
+            continue
+
         if part.startswith("**") and part.endswith("**"):
             clean = part[2:-2]
             run = paragraph.add_run(clean)
             run.bold = True
         else:
             run = paragraph.add_run(part)
+
         run.font.name = "Times New Roman"
         run.font.size = Pt(14)
 
+
 def create_doc_stable(content, ten_bai, lop):
+    """Tạo file Word A4 chuẩn, font Times New Roman 14."""
     doc = Document()
 
+    # Khổ giấy A4 + lề
     section = doc.sections[0]
     section.page_width = Cm(21)
     section.page_height = Cm(29.7)
@@ -43,12 +67,14 @@ def create_doc_stable(content, ten_bai, lop):
     section.left_margin = Cm(3)
     section.right_margin = Cm(1.5)
 
+    # Style mặc định
     style = doc.styles["Normal"]
     font = style.font
     font.name = "Times New Roman"
     font.size = Pt(14)
     style.paragraph_format.line_spacing = 1.2
 
+    # Tiêu đề
     head = doc.add_heading(f"KẾ HOẠCH BÀI DẠY: {ten_bai.upper()}", 0)
     head.alignment = 1
     for run in head.runs:
@@ -59,25 +85,30 @@ def create_doc_stable(content, ten_bai, lop):
 
     p_lop = doc.add_paragraph(f"Lớp: {lop}")
     p_lop.alignment = 1
-    p_lop.runs[0].bold = True
+    if p_lop.runs:
+        p_lop.runs[0].bold = True
+        p_lop.runs[0].font.name = "Times New Roman"
+        p_lop.runs[0].font.size = Pt(14)
 
     doc.add_paragraph("-" * 60).alignment = 1
 
     lines = content.split("\n")
     i = 0
+
     while i < len(lines):
         line = lines[i].strip()
 
         if line.startswith("#"):
             line = line.replace("#", "").strip()
 
+        # Xử lý bảng markdown
         if line.startswith("|"):
             table_lines = []
             while i < len(lines) and lines[i].strip().startswith("|"):
                 table_lines.append(lines[i].strip())
                 i += 1
 
-            if len(table_lines) >= 3:
+            if len(table_lines) >= 2:
                 try:
                     valid_rows = [r for r in table_lines if "---" not in r]
                     if valid_rows:
@@ -94,7 +125,11 @@ def create_doc_stable(content, ten_bai, lop):
                                         cell = table.cell(r_idx, c_idx)
                                         cell._element.clear_content()
 
-                                        raw_content = cell_text.strip().replace("<br>", "\n").replace("<br/>", "\n")
+                                        raw_content = (
+                                            cell_text.strip()
+                                            .replace("<br>", "\n")
+                                            .replace("<br/>", "\n")
+                                        )
                                         sub_lines = raw_content.split("\n")
 
                                         for sub_line in sub_lines:
@@ -119,22 +154,29 @@ def create_doc_stable(content, ten_bai, lop):
                     pass
             continue
 
+        # Bỏ qua dòng trống
         if not line:
             i += 1
             continue
 
-        if re.match(r"^(I\.|II\.|III\.|IV\.|V\.)", line) or (re.match(r"^\d+\.", line) and len(line) < 50):
+        # Heading
+        if re.match(r"^(I\.|II\.|III\.|IV\.|V\.)", line) or (
+            re.match(r"^\d+\.", line) and len(line) < 80
+        ):
             clean = line.replace("**", "").strip()
-            p = doc.add_paragraph(clean)
-            p.runs[0].bold = True
-            p.runs[0].font.name = "Times New Roman"
-            p.runs[0].font.size = Pt(14)
+            p = doc.add_paragraph()
+            run = p.add_run(clean)
+            run.bold = True
+            run.font.name = "Times New Roman"
+            run.font.size = Pt(14)
 
+        # Gạch đầu dòng
         elif line.startswith("- "):
             clean = line[2:].strip()
             p = doc.add_paragraph(style="List Bullet")
             add_formatted_text(p, clean)
 
+        # Đoạn văn thường
         else:
             p = doc.add_paragraph()
             add_formatted_text(p, line)
@@ -143,15 +185,17 @@ def create_doc_stable(content, ten_bai, lop):
 
     return doc
 
-# --- 3. HÀM CHUYỂN FILE LÊN GEMINI ---
+
 def upload_file_to_gemini(client, file_path, mime_type):
-    uploaded = client.files.upload(
+    """Upload file lên Gemini Files API."""
+    return client.files.upload(
         file=file_path,
         config=types.UploadFileConfig(mime_type=mime_type)
     )
-    return uploaded
+
 
 def build_contents(prompt_instruction, uploaded_refs, extra_text=None):
+    """Tạo contents cho Gemini theo SDK mới."""
     parts = [types.Part(text=prompt_instruction)]
 
     for ref in uploaded_refs:
@@ -162,32 +206,70 @@ def build_contents(prompt_instruction, uploaded_refs, extra_text=None):
 
     return [types.Content(role="user", parts=parts)]
 
-# --- 4. CSS GIAO DIỆN ---
+
+def render_response_box(text: str):
+    """Hiển thị kết quả đẹp và an toàn hơn."""
+    escaped = safe_html(text).replace("\n", "<br>")
+    st.markdown("### 📄 KẾT QUẢ BÀI SOẠN:")
+    st.markdown(
+        f'<div class="lesson-plan-paper">{escaped}</div>',
+        unsafe_allow_html=True
+    )
+
+
+# =========================
+# 3. CSS GIAO DIỆN
+# =========================
 st.markdown("""
 <style>
-    [data-testid="stAppViewContainer"] { background-color: #f4f6f9; }
+    [data-testid="stAppViewContainer"] {
+        background-color: #f4f6f9;
+    }
 
     .main-header {
         background: linear-gradient(135deg, #004e92 0%, #000428 100%);
-        padding: 30px; border-radius: 15px; text-align: center; color: white !important;
-        margin-bottom: 30px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        padding: 30px;
+        border-radius: 15px;
+        text-align: center;
+        color: white !important;
+        margin-bottom: 30px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
     }
-    .main-header h1 { color: white !important; margin: 0; font-size: 2rem; }
-    .main-header p { color: #e0e0e0 !important; margin-top: 10px; font-style: italic; }
+
+    .main-header h1 {
+        color: white !important;
+        margin: 0;
+        font-size: 2rem;
+    }
+
+    .main-header p {
+        color: #e0e0e0 !important;
+        margin-top: 10px;
+        font-style: italic;
+    }
 
     .section-header {
-        color: #004e92; border-bottom: 2px solid #ddd; padding-bottom: 5px;
-        margin-top: 20px; margin-bottom: 15px; font-weight: bold;
+        color: #004e92;
+        border-bottom: 2px solid #ddd;
+        padding-bottom: 5px;
+        margin-top: 20px;
+        margin-bottom: 15px;
+        font-weight: bold;
     }
 
     .lesson-plan-paper {
-        background-color: white; padding: 40px; border-radius: 5px;
-        border: 1px solid #ccc; box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        background-color: white;
+        padding: 40px;
+        border-radius: 5px;
+        border: 1px solid #ccc;
+        box-shadow: 0 5px 15px rgba(0,0,0,0.1);
         font-family: 'Times New Roman', Times, serif !important;
         font-size: 14pt !important;
-        line-height: 1.5 !important;
+        line-height: 1.6 !important;
         color: #000000 !important;
         text-align: justify;
+        white-space: normal;
+        word-wrap: break-word;
     }
 
     div.stButton > button {
@@ -200,19 +282,33 @@ st.markdown("""
         width: 100%;
         margin-top: 10px;
         font-size: 18px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+    }
+
+    div.stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 12px rgba(0,0,0,0.3);
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 5. GIAO DIỆN CHÍNH ---
-st.markdown("""
+
+# =========================
+# 4. HEADER
+# =========================
+st.markdown(f"""
 <div class="main-header">
-    <h1>📘 TRỢ LÝ SOẠN GIÁO ÁN TỰ ĐỘNG (NLS)</h1>
-    <p>Tác giả: La Mạnh Hùng - Trường PTDTBT Tiểu học Nà Khương - ĐT: 0388 667 404</p>
+    <h1>{TEN_UNG_DUNG}</h1>
+    <p>Tác giả: {TEN_TAC_GIA} - {TEN_TRUONG} - ĐT: {SO_DIEN_THOAI}</p>
 </div>
 """, unsafe_allow_html=True)
 
+
+# =========================
+# 5. CẤU HÌNH API KEY
+# =========================
 api_key = ""
+
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 else:
@@ -227,6 +323,10 @@ if api_key:
     except Exception as e:
         st.error(f"Lỗi khởi tạo Gemini client: {e}")
 
+
+# =========================
+# 6. TÀI LIỆU NGUỒN
+# =========================
 st.markdown('<div class="section-header">📂 1. TÀI LIỆU NGUỒN</div>', unsafe_allow_html=True)
 
 has_framework = False
@@ -253,6 +353,10 @@ if uploaded_files:
             with cols[i % 3]:
                 st.info(f"📄 {f.name}")
 
+
+# =========================
+# 7. THÔNG TIN BÀI DẠY
+# =========================
 st.markdown('<div class="section-header">📝 2. THÔNG TIN BÀI DẠY</div>', unsafe_allow_html=True)
 
 c1, c2 = st.columns(2)
@@ -266,9 +370,15 @@ yeu_cau_them = st.text_input("💡 Yêu cầu đặc biệt:", placeholder="Ví 
 
 st.markdown("<br>", unsafe_allow_html=True)
 
+
+# =========================
+# 8. XỬ LÝ CHÍNH
+# =========================
 if st.button("🚀 SOẠN GIÁO ÁN NGAY"):
-    if not api_key or not client:
-        st.error("Thiếu hoặc lỗi API Key.")
+    if not api_key:
+        st.error("Thiếu API Key.")
+    elif not client:
+        st.error("Không khởi tạo được Gemini client.")
     elif not uploaded_files and not noidung_bosung and not has_framework:
         st.warning("Thiếu tài liệu đầu vào.")
     elif not ten_bai.strip():
@@ -357,10 +467,11 @@ LƯU Ý QUAN TRỌNG TỪ NGƯỜI DÙNG: {yeu_cau_them}
                     )
                 )
 
-                result_text = response.text if hasattr(response, "text") and response.text else "Không có nội dung trả về."
+                result_text = getattr(response, "text", None)
+                if not result_text:
+                    result_text = "Không có nội dung trả về."
 
-                st.markdown("### 📄 KẾT QUẢ BÀI SOẠN:")
-                st.markdown(f'<div class="lesson-plan-paper">{result_text}</div>', unsafe_allow_html=True)
+                render_response_box(result_text)
 
                 doc = create_doc_stable(result_text, ten_bai, lop)
                 buf = io.BytesIO()
@@ -368,6 +479,7 @@ LƯU Ý QUAN TRỌNG TỪ NGƯỜI DÙNG: {yeu_cau_them}
                 buf.seek(0)
 
                 safe_file_name = re.sub(r'[\\\\/*?:"<>|]', "_", ten_bai).strip() or "GiaoAn"
+
                 st.download_button(
                     label="⬇️ TẢI FILE WORD CHUẨN A4",
                     data=buf,
@@ -387,8 +499,12 @@ LƯU Ý QUAN TRỌNG TỪ NGƯỜI DÙNG: {yeu_cau_them}
                 except Exception:
                     pass
 
+
+# =========================
+# 9. FOOTER
+# =========================
 st.markdown("---")
 st.markdown(
-    "<div style='text-align: center; color: #666;'>© 2025 - La Mạnh Hùng - Trường PTDTBT Tiểu học Nà Khương - ĐT: 0388 667 404</div>",
+    f"<div style='text-align: center; color: #666;'>© 2025 - {TEN_TAC_GIA} - {TEN_TRUONG} - ĐT: {SO_DIEN_THOAI}</div>",
     unsafe_allow_html=True
 )
