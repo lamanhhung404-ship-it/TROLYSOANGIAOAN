@@ -5,8 +5,11 @@ import tempfile
 import os
 import io
 import re
+import json
 from docx import Document
 from docx.shared import Pt, RGBColor, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+
 
 # =========================
 # 1. CẤU HÌNH CHUNG
@@ -26,7 +29,6 @@ TEN_UNG_DUNG = "📘 TRỢ LÝ SOẠN GIÁO ÁN TỰ ĐỘNG (NLS)"
 # 2. HÀM TIỆN ÍCH
 # =========================
 def safe_html(text: str) -> str:
-    """Thoát ký tự HTML cơ bản để hiển thị an toàn trong markdown HTML."""
     if not text:
         return ""
     return (
@@ -36,158 +38,157 @@ def safe_html(text: str) -> str:
     )
 
 
-def add_formatted_text(paragraph, text):
-    """Thêm text có hỗ trợ in đậm bằng cú pháp **text** và ép font Times New Roman."""
-    parts = re.split(r"(\*\*.*?\*\*)", text)
-    for part in parts:
-        if not part:
-            continue
+def clean_text(s: str) -> str:
+    if not s:
+        return ""
+    s = str(s).strip()
+    banned_prefixes = [
+        "tuyệt vời",
+        "hy vọng",
+        "nếu có bất kỳ",
+        "tôi rất sẵn lòng",
+        "dựa vào khung chương trình",
+        "xin chào",
+        "sau đây",
+        "mình sẽ",
+        "tôi sẽ",
+    ]
+    lower = s.lower()
+    for bad in banned_prefixes:
+        if lower.startswith(bad):
+            return ""
+    return s
 
-        if part.startswith("**") and part.endswith("**"):
-            clean = part[2:-2]
-            run = paragraph.add_run(clean)
-            run.bold = True
-        else:
-            run = paragraph.add_run(part)
 
-        run.font.name = "Times New Roman"
-        run.font.size = Pt(14)
+def normalize_bullets(items):
+    result = []
+    if not items:
+        return result
+    for item in items:
+        item = clean_text(item)
+        if item:
+            result.append(item)
+    return result
 
 
-def create_doc_stable(content, ten_bai, lop):
-    """Tạo file Word A4 chuẩn, font Times New Roman 14."""
-    doc = Document()
+def set_run_font(run, bold=False, size=14):
+    run.bold = bold
+    run.font.name = "Times New Roman"
+    run.font.size = Pt(size)
 
-    # Khổ giấy A4 + lề
-    section = doc.sections[0]
-    section.page_width = Cm(21)
-    section.page_height = Cm(29.7)
-    section.top_margin = Cm(2)
-    section.bottom_margin = Cm(2)
-    section.left_margin = Cm(3)
-    section.right_margin = Cm(1.5)
 
-    # Style mặc định
-    style = doc.styles["Normal"]
-    font = style.font
-    font.name = "Times New Roman"
-    font.size = Pt(14)
-    style.paragraph_format.line_spacing = 1.2
+def add_bullet_paragraph(doc_or_cell, text):
+    p = doc_or_cell.add_paragraph(style="List Bullet")
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(2)
+    p.paragraph_format.line_spacing = 1.1
+    r = p.add_run(text)
+    set_run_font(r, bold=False, size=14)
+    return p
 
-    # Tiêu đề
-    head = doc.add_heading(f"KẾ HOẠCH BÀI DẠY: {ten_bai.upper()}", 0)
-    head.alignment = 1
-    for run in head.runs:
-        run.font.name = "Times New Roman"
-        run.font.size = Pt(14)
-        run.font.bold = True
-        run.font.color.rgb = RGBColor(0, 0, 0)
 
-    p_lop = doc.add_paragraph(f"Lớp: {lop}")
-    p_lop.alignment = 1
-    if p_lop.runs:
-        p_lop.runs[0].bold = True
-        p_lop.runs[0].font.name = "Times New Roman"
-        p_lop.runs[0].font.size = Pt(14)
+def add_normal_paragraph(doc_or_cell, text, bold=False, align=None):
+    p = doc_or_cell.add_paragraph()
+    if align is not None:
+        p.alignment = align
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(3)
+    p.paragraph_format.line_spacing = 1.2
+    r = p.add_run(text)
+    set_run_font(r, bold=bold, size=14)
+    return p
 
-    doc.add_paragraph("-" * 60).alignment = 1
 
-    lines = content.split("\n")
-    i = 0
+def extract_json_block(text: str) -> dict:
+    if not text:
+        raise ValueError("Model không trả về nội dung.")
 
-    while i < len(lines):
-        line = lines[i].strip()
+    text = text.strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("Không tìm thấy JSON hợp lệ trong phản hồi của AI.")
 
-        if line.startswith("#"):
-            line = line.replace("#", "").strip()
+    json_text = text[start:end + 1]
+    return json.loads(json_text)
 
-        # Xử lý bảng markdown
-        if line.startswith("|"):
-            table_lines = []
-            while i < len(lines) and lines[i].strip().startswith("|"):
-                table_lines.append(lines[i].strip())
-                i += 1
 
-            if len(table_lines) >= 2:
-                try:
-                    valid_rows = [r for r in table_lines if "---" not in r]
-                    if valid_rows:
-                        cols_count = len(valid_rows[0].split("|")) - 2
-                        if cols_count > 0:
-                            table = doc.add_table(rows=len(valid_rows), cols=cols_count)
-                            table.style = "Table Grid"
-                            table.autofit = True
+def validate_lesson_plan(data: dict):
+    required_top_keys = [
+        "ten_bai",
+        "mon_hoc",
+        "lop",
+        "thoi_luong",
+        "yeu_cau_can_dat",
+        "do_dung_day_hoc",
+        "tien_trinh_day_hoc",
+        "dieu_chinh_sau_tiet_day"
+    ]
+    for key in required_top_keys:
+        if key not in data:
+            raise ValueError(f"Thiếu trường bắt buộc trong JSON: {key}")
 
-                            for r_idx, r_text in enumerate(valid_rows):
-                                cells_data = r_text.split("|")[1:-1]
-                                for c_idx, cell_text in enumerate(cells_data):
-                                    if c_idx < cols_count:
-                                        cell = table.cell(r_idx, c_idx)
-                                        cell._element.clear_content()
+    yccd = data["yeu_cau_can_dat"]
+    for key in [
+        "hoc_sinh_thuc_hien_duoc",
+        "hoc_sinh_van_dung_duoc",
+        "phat_trien_nang_luc",
+        "phat_trien_pham_chat",
+        "noi_dung_tich_hop"
+    ]:
+        if key not in yccd:
+            raise ValueError(f"Thiếu mục trong 'yeu_cau_can_dat': {key}")
 
-                                        raw_content = (
-                                            cell_text.strip()
-                                            .replace("<br>", "\n")
-                                            .replace("<br/>", "\n")
-                                        )
-                                        sub_lines = raw_content.split("\n")
+    ptnl = yccd["phat_trien_nang_luc"]
+    for key in ["nang_luc_dac_thu", "nang_luc_chung", "nang_luc_so"]:
+        if key not in ptnl:
+            raise ValueError(f"Thiếu mục trong 'phat_trien_nang_luc': {key}")
 
-                                        for sub_line in sub_lines:
-                                            sub_line = sub_line.strip()
-                                            if not sub_line:
-                                                continue
+    ndth = yccd["noi_dung_tich_hop"]
+    for key in ["hoc_thong_qua_choi", "cong_dan_so"]:
+        if key not in ndth:
+            raise ValueError(f"Thiếu mục trong 'noi_dung_tich_hop': {key}")
 
-                                            p = cell.add_paragraph()
-                                            p.paragraph_format.space_before = Pt(0)
-                                            p.paragraph_format.space_after = Pt(2)
-                                            p.paragraph_format.line_spacing = 1.1
+    dddh = data["do_dung_day_hoc"]
+    for key in ["giao_vien", "hoc_sinh"]:
+        if key not in dddh:
+            raise ValueError(f"Thiếu mục trong 'do_dung_day_hoc': {key}")
 
-                                            if r_idx == 0:
-                                                p.alignment = 1
-                                                run = p.add_run(sub_line.replace("**", ""))
-                                                run.bold = True
-                                                run.font.name = "Times New Roman"
-                                                run.font.size = Pt(14)
-                                            else:
-                                                add_formatted_text(p, sub_line)
-                except Exception:
-                    pass
-            continue
+    activities = data["tien_trinh_day_hoc"]
+    if not isinstance(activities, list) or len(activities) != 4:
+        raise ValueError("Tiến trình dạy học phải có đúng 4 hoạt động.")
 
-        # Bỏ qua dòng trống
-        if not line:
-            i += 1
-            continue
+    expected_names = [
+        "Hoạt động 1 - Khởi động",
+        "Hoạt động 2 - Hình thành kiến thức mới",
+        "Hoạt động 3 - Thực hành - luyện tập",
+        "Hoạt động 4 - Vận dụng"
+    ]
 
-        # Heading
-        if re.match(r"^(I\.|II\.|III\.|IV\.|V\.)", line) or (
-            re.match(r"^\d+\.", line) and len(line) < 80
-        ):
-            clean = line.replace("**", "").strip()
-            p = doc.add_paragraph()
-            run = p.add_run(clean)
-            run.bold = True
-            run.font.name = "Times New Roman"
-            run.font.size = Pt(14)
+    for idx, act in enumerate(activities):
+        for key in ["ten_hoat_dong", "thoi_gian", "giao_vien", "hoc_sinh"]:
+            if key not in act:
+                raise ValueError(f"Thiếu trường '{key}' trong hoạt động {idx + 1}")
 
-        # Gạch đầu dòng
-        elif line.startswith("- "):
-            clean = line[2:].strip()
-            p = doc.add_paragraph(style="List Bullet")
-            add_formatted_text(p, clean)
+        if expected_names[idx].lower() not in act["ten_hoat_dong"].lower():
+            raise ValueError(f"Tên hoạt động {idx + 1} chưa đúng chuẩn.")
 
-        # Đoạn văn thường
-        else:
-            p = doc.add_paragraph()
-            add_formatted_text(p, line)
+        if not isinstance(act["giao_vien"], list) or not act["giao_vien"]:
+            raise ValueError(f"Hoạt động {idx + 1} thiếu nội dung cột giáo viên.")
 
-        i += 1
+        if not isinstance(act["hoc_sinh"], list) or not act["hoc_sinh"]:
+            raise ValueError(f"Hoạt động {idx + 1} thiếu nội dung cột học sinh.")
 
-    return doc
+
+def ensure_default_adjustments(data: dict):
+    if not data.get("dieu_chinh_sau_tiet_day"):
+        data["dieu_chinh_sau_tiet_day"] = [
+            "Sau tiết dạy, giáo viên ghi nhận những điểm phù hợp và những nội dung cần điều chỉnh để tổ chức bài học hiệu quả hơn ở lần sau."
+        ]
+    return data
 
 
 def upload_file_to_gemini(client, file_path, mime_type):
-    """Upload file lên Gemini Files API."""
     return client.files.upload(
         file=file_path,
         config=types.UploadFileConfig(mime_type=mime_type)
@@ -195,7 +196,6 @@ def upload_file_to_gemini(client, file_path, mime_type):
 
 
 def build_contents(prompt_instruction, uploaded_refs, extra_text=None):
-    """Tạo contents cho Gemini theo SDK mới."""
     parts = [types.Part(text=prompt_instruction)]
 
     for ref in uploaded_refs:
@@ -207,14 +207,329 @@ def build_contents(prompt_instruction, uploaded_refs, extra_text=None):
     return [types.Content(role="user", parts=parts)]
 
 
+def render_lesson_plan_text(data: dict) -> str:
+    lines = []
+    lines.append(f"KẾ HOẠCH BÀI DẠY: {data.get('ten_bai', '').upper()}")
+    lines.append(f"Môn học: {data.get('mon_hoc', '')}")
+    lines.append(f"Lớp: {data.get('lop', '')}")
+    lines.append(f"Thời lượng: {data.get('thoi_luong', '35 phút')}")
+    lines.append("")
+
+    lines.append("I. Yêu cầu cần đạt")
+    yccd = data["yeu_cau_can_dat"]
+
+    lines.append("1. Học sinh thực hiện được")
+    for x in normalize_bullets(yccd["hoc_sinh_thuc_hien_duoc"]):
+        lines.append(f"- {x}")
+
+    lines.append("2. Học sinh vận dụng được")
+    for x in normalize_bullets(yccd["hoc_sinh_van_dung_duoc"]):
+        lines.append(f"- {x}")
+
+    lines.append("3. Phát triển năng lực")
+    lines.append("- Năng lực đặc thù")
+    for x in normalize_bullets(yccd["phat_trien_nang_luc"]["nang_luc_dac_thu"]):
+        lines.append(f"  - {x}")
+
+    lines.append("- Năng lực chung")
+    for x in normalize_bullets(yccd["phat_trien_nang_luc"]["nang_luc_chung"]):
+        lines.append(f"  - {x}")
+
+    lines.append("- Năng lực số")
+    for x in normalize_bullets(yccd["phat_trien_nang_luc"]["nang_luc_so"]):
+        lines.append(f"  - {x}")
+
+    lines.append("4. Phát triển phẩm chất")
+    for x in normalize_bullets(yccd["phat_trien_pham_chat"]):
+        lines.append(f"- {x}")
+
+    lines.append("* Nội dung tích hợp")
+    lines.append("- Học thông qua chơi")
+    for x in normalize_bullets(yccd["noi_dung_tich_hop"]["hoc_thong_qua_choi"]):
+        lines.append(f"  - {x}")
+
+    lines.append("- Công dân số")
+    for x in normalize_bullets(yccd["noi_dung_tich_hop"]["cong_dan_so"]):
+        lines.append(f"  - {x}")
+
+    lines.append("")
+    lines.append("II. Đồ dùng dạy học")
+    lines.append("1. Giáo viên")
+    for x in normalize_bullets(data["do_dung_day_hoc"]["giao_vien"]):
+        lines.append(f"- {x}")
+
+    lines.append("2. Học sinh")
+    for x in normalize_bullets(data["do_dung_day_hoc"]["hoc_sinh"]):
+        lines.append(f"- {x}")
+
+    lines.append("")
+    lines.append("III. Tiến trình dạy học")
+    lines.append("| HOẠT ĐỘNG CỦA GIÁO VIÊN | HOẠT ĐỘNG CỦA HỌC SINH |")
+    lines.append("|---|---|")
+    for act in data["tien_trinh_day_hoc"]:
+        gv_text = "<br>".join([f"- {x}" for x in normalize_bullets(act["giao_vien"])])
+        hs_text = "<br>".join([f"- {x}" for x in normalize_bullets(act["hoc_sinh"])])
+        title = f"**{act['ten_hoat_dong']} ({act['thoi_gian']})**<br>"
+        lines.append(f"| {title}{gv_text} | {hs_text} |")
+
+    lines.append("")
+    lines.append("IV. Điều chỉnh sau tiết dạy")
+    for x in normalize_bullets(data["dieu_chinh_sau_tiet_day"]):
+        lines.append(f"- {x}")
+
+    return "\n".join(lines)
+
+
 def render_response_box(text: str):
-    """Hiển thị kết quả đẹp và an toàn hơn."""
     escaped = safe_html(text).replace("\n", "<br>")
     st.markdown("### 📄 KẾT QUẢ BÀI SOẠN:")
     st.markdown(
         f'<div class="lesson-plan-paper">{escaped}</div>',
         unsafe_allow_html=True
     )
+
+
+def create_doc_from_json(data: dict):
+    doc = Document()
+
+    section = doc.sections[0]
+    section.page_width = Cm(21)
+    section.page_height = Cm(29.7)
+    section.top_margin = Cm(2)
+    section.bottom_margin = Cm(2)
+    section.left_margin = Cm(3)
+    section.right_margin = Cm(1.5)
+
+    style = doc.styles["Normal"]
+    style.font.name = "Times New Roman"
+    style.font.size = Pt(14)
+    style.paragraph_format.line_spacing = 1.2
+
+    # Tiêu đề
+    head = doc.add_heading(f"KẾ HOẠCH BÀI DẠY: {data.get('ten_bai', '').upper()}", 0)
+    head.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in head.runs:
+        set_run_font(run, bold=True, size=14)
+        run.font.color.rgb = RGBColor(0, 0, 0)
+
+    # Thông tin đầu
+    add_normal_paragraph(doc, f"Môn học: {data.get('mon_hoc', '')}")
+    add_normal_paragraph(doc, f"Lớp: {data.get('lop', '')}")
+    add_normal_paragraph(doc, f"Thời lượng: {data.get('thoi_luong', '35 phút')}")
+
+    # I
+    add_normal_paragraph(doc, "I. Yêu cầu cần đạt", bold=True)
+    yccd = data["yeu_cau_can_dat"]
+
+    add_normal_paragraph(doc, "1. Học sinh thực hiện được", bold=True)
+    for item in normalize_bullets(yccd["hoc_sinh_thuc_hien_duoc"]):
+        add_bullet_paragraph(doc, item)
+
+    add_normal_paragraph(doc, "2. Học sinh vận dụng được", bold=True)
+    for item in normalize_bullets(yccd["hoc_sinh_van_dung_duoc"]):
+        add_bullet_paragraph(doc, item)
+
+    add_normal_paragraph(doc, "3. Phát triển năng lực", bold=True)
+
+    add_normal_paragraph(doc, "- Năng lực đặc thù", bold=True)
+    for item in normalize_bullets(yccd["phat_trien_nang_luc"]["nang_luc_dac_thu"]):
+        add_bullet_paragraph(doc, item)
+
+    add_normal_paragraph(doc, "- Năng lực chung", bold=True)
+    for item in normalize_bullets(yccd["phat_trien_nang_luc"]["nang_luc_chung"]):
+        add_bullet_paragraph(doc, item)
+
+    add_normal_paragraph(doc, "- Năng lực số", bold=True)
+    for item in normalize_bullets(yccd["phat_trien_nang_luc"]["nang_luc_so"]):
+        add_bullet_paragraph(doc, item)
+
+    add_normal_paragraph(doc, "4. Phát triển phẩm chất", bold=True)
+    for item in normalize_bullets(yccd["phat_trien_pham_chat"]):
+        add_bullet_paragraph(doc, item)
+
+    add_normal_paragraph(doc, "* Nội dung tích hợp", bold=True)
+
+    add_normal_paragraph(doc, "- Học thông qua chơi", bold=True)
+    for item in normalize_bullets(yccd["noi_dung_tich_hop"]["hoc_thong_qua_choi"]):
+        add_bullet_paragraph(doc, item)
+
+    add_normal_paragraph(doc, "- Công dân số", bold=True)
+    for item in normalize_bullets(yccd["noi_dung_tich_hop"]["cong_dan_so"]):
+        add_bullet_paragraph(doc, item)
+
+    # II
+    add_normal_paragraph(doc, "II. Đồ dùng dạy học", bold=True)
+
+    add_normal_paragraph(doc, "1. Giáo viên", bold=True)
+    for item in normalize_bullets(data["do_dung_day_hoc"]["giao_vien"]):
+        add_bullet_paragraph(doc, item)
+
+    add_normal_paragraph(doc, "2. Học sinh", bold=True)
+    for item in normalize_bullets(data["do_dung_day_hoc"]["hoc_sinh"]):
+        add_bullet_paragraph(doc, item)
+
+    # III
+    add_normal_paragraph(doc, "III. Tiến trình dạy học", bold=True)
+
+    table = doc.add_table(rows=1, cols=2)
+    table.style = "Table Grid"
+    table.autofit = True
+
+    hdr = table.rows[0].cells
+    hdr[0].text = "HOẠT ĐỘNG CỦA GIÁO VIÊN"
+    hdr[1].text = "HOẠT ĐỘNG CỦA HỌC SINH"
+
+    for cell in hdr:
+        for p in cell.paragraphs:
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for run in p.runs:
+                set_run_font(run, bold=True, size=14)
+
+    for act in data["tien_trinh_day_hoc"]:
+        row = table.add_row().cells
+
+        # Cột giáo viên
+        row[0].paragraphs[0].clear()
+        p_left_title = row[0].paragraphs[0]
+        p_left_title.paragraph_format.space_after = Pt(3)
+        r_left = p_left_title.add_run(f"{act['ten_hoat_dong']} ({act['thoi_gian']})")
+        set_run_font(r_left, bold=True, size=14)
+
+        for item in normalize_bullets(act["giao_vien"]):
+            add_bullet_paragraph(row[0], item)
+
+        # Cột học sinh
+        row[1].paragraphs[0].clear()
+        p_right_title = row[1].paragraphs[0]
+        p_right_title.paragraph_format.space_after = Pt(3)
+        r_right = p_right_title.add_run("Hoạt động của học sinh")
+        set_run_font(r_right, bold=True, size=14)
+
+        for item in normalize_bullets(act["hoc_sinh"]):
+            add_bullet_paragraph(row[1], item)
+
+    # IV
+    add_normal_paragraph(doc, "IV. Điều chỉnh sau tiết dạy", bold=True)
+    for item in normalize_bullets(data["dieu_chinh_sau_tiet_day"]):
+        add_bullet_paragraph(doc, item)
+
+    return doc
+
+
+def generate_lesson_prompt(ten_bai, lop, noidung_bosung, yeu_cau_them):
+    return f"""
+Bạn là công cụ sinh giáo án tiểu học theo đúng mẫu quy định.
+NHIỆM VỤ: Sinh duy nhất 1 JSON hợp lệ. KHÔNG viết lời mở đầu. KHÔNG giải thích. KHÔNG kết luận. KHÔNG dùng markdown. KHÔNG dùng code fence.
+
+Dữ liệu bài dạy:
+- Tên bài: {ten_bai}
+- Lớp: {lop}
+- Ghi chú bổ sung: {noidung_bosung}
+- Yêu cầu thêm: {yeu_cau_them}
+
+Yêu cầu bắt buộc:
+1. Bám đúng cấu trúc:
+   I. Yêu cầu cần đạt
+   II. Đồ dùng dạy học
+   III. Tiến trình dạy học
+   IV. Điều chỉnh sau tiết dạy
+
+2. Mục I phải gồm đủ:
+   - hoc_sinh_thuc_hien_duoc
+   - hoc_sinh_van_dung_duoc
+   - phat_trien_nang_luc:
+       + nang_luc_dac_thu
+       + nang_luc_chung
+       + nang_luc_so
+   - phat_trien_pham_chat
+   - noi_dung_tich_hop:
+       + hoc_thong_qua_choi
+       + cong_dan_so
+
+3. Mục III phải có đúng 4 hoạt động:
+   - Hoạt động 1 - Khởi động
+   - Hoạt động 2 - Hình thành kiến thức mới
+   - Hoạt động 3 - Thực hành - luyện tập
+   - Hoạt động 4 - Vận dụng
+
+4. Mỗi hoạt động phải có:
+   - ten_hoat_dong
+   - thoi_gian
+   - giao_vien: danh sách các ý, mỗi ý là 1 gạch đầu dòng
+   - hoc_sinh: danh sách các ý, mỗi ý là 1 gạch đầu dòng
+
+5. Phần III bắt buộc để app xuất thành bảng 2 cột:
+   - Cột 1: HOẠT ĐỘNG CỦA GIÁO VIÊN
+   - Cột 2: HOẠT ĐỘNG CỦA HỌC SINH
+   Không được trộn lẫn hai cột.
+
+6. Nếu có trò chơi thì luật chơi phải nằm trong danh sách 'giao_vien' của hoạt động tương ứng.
+
+7. Tổng thời lượng phù hợp 35 phút.
+
+8. Không được sinh các câu xã giao như:
+   - Tuyệt vời...
+   - Tôi rất sẵn lòng...
+   - Hy vọng...
+   - Nếu cần...
+   - Đừng ngần ngại...
+
+9. Mọi nội dung phải ngắn gọn, đúng chất giáo án, bám sát chuẩn trường tiểu học Việt Nam.
+
+10. Chỉ trả về JSON hợp lệ theo đúng schema dưới đây:
+
+{{
+  "ten_bai": "{ten_bai}",
+  "mon_hoc": "...",
+  "lop": "{lop}",
+  "thoi_luong": "35 phút",
+  "yeu_cau_can_dat": {{
+    "hoc_sinh_thuc_hien_duoc": ["..."],
+    "hoc_sinh_van_dung_duoc": ["..."],
+    "phat_trien_nang_luc": {{
+      "nang_luc_dac_thu": ["..."],
+      "nang_luc_chung": ["..."],
+      "nang_luc_so": ["..."]
+    }},
+    "phat_trien_pham_chat": ["..."],
+    "noi_dung_tich_hop": {{
+      "hoc_thong_qua_choi": ["..."],
+      "cong_dan_so": ["..."]
+    }}
+  }},
+  "do_dung_day_hoc": {{
+    "giao_vien": ["..."],
+    "hoc_sinh": ["..."]
+  }},
+  "tien_trinh_day_hoc": [
+    {{
+      "ten_hoat_dong": "Hoạt động 1 - Khởi động",
+      "thoi_gian": "5 phút",
+      "giao_vien": ["..."],
+      "hoc_sinh": ["..."]
+    }},
+    {{
+      "ten_hoat_dong": "Hoạt động 2 - Hình thành kiến thức mới",
+      "thoi_gian": "15 phút",
+      "giao_vien": ["..."],
+      "hoc_sinh": ["..."]
+    }},
+    {{
+      "ten_hoat_dong": "Hoạt động 3 - Thực hành - luyện tập",
+      "thoi_gian": "10 phút",
+      "giao_vien": ["..."],
+      "hoc_sinh": ["..."]
+    }},
+    {{
+      "ten_hoat_dong": "Hoạt động 4 - Vận dụng",
+      "thoi_gian": "5 phút",
+      "giao_vien": ["..."],
+      "hoc_sinh": ["..."]
+    }}
+  ],
+  "dieu_chinh_sau_tiet_day": ["..."]
+}}
+"""
 
 
 # =========================
@@ -388,52 +703,13 @@ if st.button("🚀 SOẠN GIÁO ÁN NGAY"):
         uploaded_refs = []
 
         try:
-            with st.spinner("AI đang soạn giáo án..."):
-                prompt_instruction = f"""
-Đóng vai là một Giáo viên Tiểu học giỏi, am hiểu chương trình GDPT 2018.
-Nhiệm vụ: Soạn Kế hoạch bài dạy (Giáo án) cho bài: "{ten_bai}" - {lop}.
-
-DỮ LIỆU ĐẦU VÀO:
-- (Nếu có) File PDF Khung năng lực số đính kèm: Hãy dùng để đối chiếu nội dung bài học và đưa vào mục Năng lực số.
-- Các tài liệu hình ảnh/PDF tải lên: Phân tích để lấy nội dung kiến thức bài học.
-- Ghi chú bổ sung: "{noidung_bosung}".
-
-YÊU CẦU LUÔN LUÔN TUÂN THỦ CẤU TRÚC (CÔNG VĂN 2345):
-I. Yêu cầu cần đạt:
-1. Học sinh thực hiện được
-2. Học sinh vận dụng được
-3. Phát triển năng lực (bao gồm năng lực đặc thù, năng lực chung, phát triển năng lực số)
-4. Phát triển phẩm chất
-* Nội dung tích hợp (VD: Học thông qua chơi, Công dân số)
-
-II. Đồ dùng dạy học
-1. Giáo viên
-2. Học sinh
-
-III. Tiến trình dạy học
-PHẢI trình bày dưới dạng bảng markdown 2 cột:
-
-| HOẠT ĐỘNG CỦA GIÁO VIÊN | HOẠT ĐỘNG CỦA HỌC SINH |
-|---|---|
-| **1. Hoạt động 1 - Khởi động:**<br>- GV tổ chức... | - HS tham gia... |
-| **2. Hoạt động 2 - Hình thành kiến thức mới:**<br>- GV hướng dẫn... | - HS quan sát... |
-| **3. Hoạt động 3 - Thực hành - luyện tập:**<br>- GV yêu cầu... | - HS thực hiện... |
-| **4. Hoạt động 4 - Vận dụng:**<br>- GV gợi mở... | - HS chia sẻ... |
-
-YÊU CẦU CHI TIẾT:
-- Chi tiết, cụ thể, đặc biệt là hoạt động của học sinh.
-- Các ý bắt đầu bằng dấu gạch đầu dòng (-).
-- Tích hợp Học thông qua chơi vào hoạt động phù hợp.
-- Nếu có trò chơi, phải nêu rõ luật chơi.
-- Chỉ có 35 phút.
-- Chỉ gồm đúng 4 hoạt động.
-- Không dùng ký tự # ở đầu dòng.
-- Không thêm chú thích nguồn vào bài soạn.
-
-IV. Điều chỉnh sau tiết dạy
-
-LƯU Ý QUAN TRỌNG TỪ NGƯỜI DÙNG: {yeu_cau_them}
-"""
+            with st.spinner("AI đang soạn giáo án theo đúng biểu mẫu..."):
+                prompt_instruction = generate_lesson_prompt(
+                    ten_bai=ten_bai,
+                    lop=lop,
+                    noidung_bosung=noidung_bosung,
+                    yeu_cau_them=yeu_cau_them
+                )
 
                 if has_framework and os.path.exists(FILE_KHUNG_NANG_LUC):
                     uploaded_refs.append(
@@ -461,19 +737,24 @@ LƯU Ý QUAN TRỌNG TỪ NGƯỜI DÙNG: {yeu_cau_them}
                     model=MODEL_NAME,
                     contents=contents,
                     config=types.GenerateContentConfig(
-                        temperature=0.7,
-                        top_p=0.95,
+                        temperature=0.2,
+                        top_p=0.9,
                         max_output_tokens=8192
                     )
                 )
 
                 result_text = getattr(response, "text", None)
                 if not result_text:
-                    result_text = "Không có nội dung trả về."
+                    raise ValueError("Model không trả về nội dung.")
 
-                render_response_box(result_text)
+                lesson_plan_data = extract_json_block(result_text)
+                lesson_plan_data = ensure_default_adjustments(lesson_plan_data)
+                validate_lesson_plan(lesson_plan_data)
 
-                doc = create_doc_stable(result_text, ten_bai, lop)
+                preview_text = render_lesson_plan_text(lesson_plan_data)
+                render_response_box(preview_text)
+
+                doc = create_doc_from_json(lesson_plan_data)
                 buf = io.BytesIO()
                 doc.save(buf)
                 buf.seek(0)
