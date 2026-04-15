@@ -1,6 +1,4 @@
 streamlit
-google-generativeai
+google-genai
 python-docx
-Pillow
-pandas
-openpyxl
+pillow
